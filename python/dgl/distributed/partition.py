@@ -907,31 +907,21 @@ def partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_method=
         return orig_nids, orig_eids
 
 
-def custom_partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_method="custom",
-                    reshuffle=True, balance_ntypes=None):
+def custom_partition_graph(g, graph_name, num_parts, out_path, node_parts=None ,
+                           num_hops=1, part_method="custom", reshuffle=True):
     """
     使用自定义的方法接入dgl的划分逻辑,主要在于替换掉dgl中Metis划分方法
 
     """
-    print("Using Custom Partitioning , have fun ...")
-
-    def get_homogeneous(g, balance_ntypes):
-        if g.is_homogeneous:
-            sim_g = to_homogeneous(g)
-            bal_ntypes = balance_ntypes
-        return sim_g, bal_ntypes
-
+    ################################## STEP-1 使用自定的划分方法 ############################
+    sim_g = g
+    print("Using Custom Partitioning , have fun v0.1...")
     
-
-    start = time.time()
-    sim_g, balance_ntypes = get_homogeneous(g, balance_ntypes)
-    print('Converting to homogeneous graph takes {:.3f}s, peak mem: {:.3f} GB'.format(
-        time.time() - start, get_peak_mem()))
-    
-    print("Using Random Partitioning")
-    node_parts = random_choice(num_parts, sim_g.number_of_nodes())
-    ### 得到一个关于顶点集合分配的向量        
-    print(node_parts,node_parts.shape)
+    # important : node map partid
+    if node_parts is None:
+        node_parts = random_choice(num_parts, sim_g.number_of_nodes())
+    else:
+        node_parts = node_parts
 
     ################################## STEP-2 转换分区图结构到DGL分布式场景 ############################
     start = time.time()
@@ -948,39 +938,29 @@ def custom_partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_
 
     node_map_val = {}
     edge_map_val = {}
-    for ntype in g.ntypes:
-        ntype_id = g.get_ntype_id(ntype)
-        val = []
-        node_map_val[ntype] = []
-        for i in parts:
-            inner_node_mask = _get_inner_node_mask(parts[i], ntype_id)
-            val.append(F.as_scalar(F.sum(F.astype(inner_node_mask, F.int64), 0)))
-            inner_nids = F.boolean_mask(parts[i].ndata[NID], inner_node_mask)
-            node_map_val[ntype].append([int(F.as_scalar(inner_nids[0])),
-                                        int(F.as_scalar(inner_nids[-1])) + 1])
-        val = np.cumsum(val).tolist()
-        assert val[-1] == g.number_of_nodes(ntype)
-    for etype in g.etypes:
-        etype_id = g.get_etype_id(etype)
-        val = []
-        edge_map_val[etype] = []
-        for i in parts:
-            inner_edge_mask = _get_inner_edge_mask(parts[i], etype_id)
-            val.append(F.as_scalar(F.sum(F.astype(inner_edge_mask, F.int64), 0)))
-            inner_eids = np.sort(F.asnumpy(F.boolean_mask(parts[i].edata[EID],
-                                                            inner_edge_mask)))
-            edge_map_val[etype].append([int(inner_eids[0]), int(inner_eids[-1]) + 1])
-        val = np.cumsum(val).tolist()
-        assert val[-1] == g.number_of_edges(etype)
+
+    ntype_id = 0
+    node_map_val = []
+    for i in parts:
+        inner_node_mask = _get_inner_node_mask(parts[i], ntype_id)
+        inner_nids = F.boolean_mask(parts[i].ndata[NID], inner_node_mask)
+        node_map_val.append([int(F.as_scalar(inner_nids[0])),
+                                    int(F.as_scalar(inner_nids[-1])) + 1])
+
+    etype_id = 0
+    edge_map_val = []
+    for i in parts:
+        inner_edge_mask = _get_inner_edge_mask(parts[i], etype_id)
+        inner_eids = np.sort(F.asnumpy(F.boolean_mask(parts[i].edata[EID],
+                                                        inner_edge_mask)))
+        edge_map_val.append([int(inner_eids[0]), int(inner_eids[-1]) + 1])
     
 
     # Double check that the node IDs in the global ID space are sorted.
-    for ntype in node_map_val:
-        val = np.concatenate([np.array(l) for l in node_map_val[ntype]])
-        assert np.all(val[:-1] <= val[1:])
-    for etype in edge_map_val:
-        val = np.concatenate([np.array(l) for l in edge_map_val[etype]])
-        assert np.all(val[:-1] <= val[1:])
+    val = np.concatenate([np.array(l) for l in node_map_val])
+    assert np.all(val[:-1] <= val[1:])
+    val = np.concatenate([np.array(l) for l in edge_map_val])
+    assert np.all(val[:-1] <= val[1:])
 
     start = time.time()
     ntypes = {ntype:g.get_ntype_id(ntype) for ntype in g.ntypes}
@@ -1004,53 +984,38 @@ def custom_partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_
         # Get the node/edge features of each partition.
         node_feats = {}
         edge_feats = {}
-        for ntype in g.ntypes:
-            ntype_id = g.get_ntype_id(ntype)
-            # To get the edges in the input graph, we should use original node IDs.
-            # Both orig_id and NID stores the per-node-type IDs.
-            ndata_name = 'orig_id' if reshuffle else NID
-            inner_node_mask = _get_inner_node_mask(part, ntype_id)
-            # This is global node IDs.
-            local_nodes = F.boolean_mask(part.ndata[ndata_name], inner_node_mask)
-            if len(g.ntypes) > 1:
-                # If the input is a heterogeneous graph.
-                local_nodes = F.gather_row(sim_g.ndata[NID], local_nodes)
-                print('part {} has {} nodes of type {} and {} are inside the partition'.format(
-                    part_id, F.as_scalar(F.sum(part.ndata[NTYPE] == ntype_id, 0)),
-                    ntype, len(local_nodes)))
-            else:
-                print('part {} has {} nodes and {} are inside the partition'.format(
-                    part_id, part.number_of_nodes(), len(local_nodes)))
 
-            for name in g.nodes[ntype].data:
-                if name in [NID, 'inner_node']:
-                    continue
-                node_feats[ntype + '/' + name] = F.gather_row(g.nodes[ntype].data[name],
-                                                                local_nodes)
+        ntype = '_N'
+        inner_node_mask = (part.ndata['inner_node'] == 1)
+        # This is global node IDs.
+        local_nodes = F.boolean_mask(part.ndata['orig_id'], inner_node_mask)
 
-        for etype in g.etypes:
-            etype_id = g.get_etype_id(etype)
-            edata_name = 'orig_id' if reshuffle else EID
-            inner_edge_mask = _get_inner_edge_mask(part, etype_id)
-            # This is global edge IDs.
-            local_edges = F.boolean_mask(part.edata[edata_name], inner_edge_mask)
-            if not g.is_homogeneous:
-                local_edges = F.gather_row(sim_g.edata[EID], local_edges)
-                print('part {} has {} edges of type {} and {} are inside the partition'.format(
-                    part_id, F.as_scalar(F.sum(part.edata[ETYPE] == etype_id, 0)),
-                    etype, len(local_edges)))
-            else:
-                print('part {} has {} edges and {} are inside the partition'.format(
-                    part_id, part.number_of_edges(), len(local_edges)))
-            tot_num_inner_edges += len(local_edges)
+        print('part {} has {} nodes and {} are inside the partition'.format(
+            part_id, part.number_of_nodes(), len(local_nodes)))
 
-            for name in g.edges[etype].data:
-                if name in [EID, 'inner_edge']:
-                    continue
-                edge_feats[etype + '/' + name] = F.gather_row(g.edges[etype].data[name],
-                                                                local_edges)
+        for name in g.nodes[ntype].data:
+            if name in [NID, 'inner_node']:
+                continue
+            # TODO: fix feat
+            node_feats[name] = F.gather_row(g.nodes[ntype].data[name],
+                                                            local_nodes)
+
+
+        etype = '_E'
+        inner_edge_mask = (part.edata['inner_edge'] == 1)
+        local_edges = F.boolean_mask(part.edata['orig_id'], inner_edge_mask)
+
+        print('part {} has {} edges and {} are inside the partition'.format(
+            part_id, part.number_of_edges(), len(local_edges)))
+        tot_num_inner_edges += len(local_edges)
+
+        for name in g.edges[etype].data:
+            if name in [EID, 'inner_edge']:
+                continue
+            edge_feats[name] = F.gather_row(g.edges[etype].data[name],
+                                                            local_edges)
         
-
+    ################################# STEP-5 保存分区结果 ############################
         part_dir = os.path.join(out_path, "part" + str(part_id))
         node_feat_file = os.path.join(part_dir, "node_feat.dgl")
         edge_feat_file = os.path.join(part_dir, "edge_feat.dgl")
@@ -1060,10 +1025,12 @@ def custom_partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_
             'edge_feats': os.path.relpath(edge_feat_file, out_path),
             'part_graph': os.path.relpath(part_graph_file, out_path)}
         os.makedirs(part_dir, mode=0o775, exist_ok=True)
+        
         save_tensors(node_feat_file, node_feats)
         save_tensors(edge_feat_file, edge_feats)
-
         save_graphs(part_graph_file, [part])
+    
+    ################################# STEP-6 统计计算时间 ############################
     print('Save partitions: {:.3f} seconds, peak memory: {:.3f} GB'.format(
         time.time() - start, get_peak_mem()))
 
