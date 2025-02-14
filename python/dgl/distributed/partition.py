@@ -997,7 +997,7 @@ def custom_partition_graph(g, graph_name, num_parts, out_path, node_parts=None ,
             if name in [NID, 'inner_node']:
                 continue
             # TODO: fix feat
-            node_feats[name] = F.gather_row(g.nodes[ntype].data[name],
+            node_feats[ntype + '/' + name] = F.gather_row(g.nodes[ntype].data[name],
                                                             local_nodes)
 
 
@@ -1012,7 +1012,7 @@ def custom_partition_graph(g, graph_name, num_parts, out_path, node_parts=None ,
         for name in g.edges[etype].data:
             if name in [EID, 'inner_edge']:
                 continue
-            edge_feats[name] = F.gather_row(g.edges[etype].data[name],
+            edge_feats[etype + '/' + name] = F.gather_row(g.edges[etype].data[name],
                                                             local_edges)
         
     ################################# STEP-5 保存分区结果 ############################
