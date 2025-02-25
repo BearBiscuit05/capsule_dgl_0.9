@@ -364,3 +364,20 @@ dgl.bincount(nodelist,nodeTable)
 # print("nodeLabel :",nodeTable)
 # dgl.bincount(src,nodeTable)
 # print("nodeLabel :",nodeTable)
+
+
+"""
+dgl.custom_partition_graph(g, graph_name, num_parts, out_path, node_parts=None)
+    构建自定义图分区,随后利用dgl进行划分后的分布式训练
+    args:
+        g(dgl.graph)             : 输入的图,包含图的完整信息
+        graph_name(str)          : 输入的图名称,用于区分不同图
+        num_parts(int)           : 分区数量
+        out_path(str)            : 输出的分区文件路径
+        node_parts(int)          : 分区信息,若为None,则进行随机分区,若已经进行过分区,
+                                    则输入一个一维tensor,每个idx对应的值表示节点idx属于哪一个分区
+    return:
+        输出的结果可以直接使用
+        g = dgl.distributed.DistGraph(args.graph_name, part_config=args.part_config)
+        进行调用
+"""
